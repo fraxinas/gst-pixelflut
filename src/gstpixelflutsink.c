@@ -31,6 +31,17 @@ GST_DEBUG_CATEGORY_STATIC (pixelflutsink_debug);
 /* Use the GstVideoSink Base class */
 G_DEFINE_TYPE (GstPixelflutSink, gst_pixelflutsink, GST_TYPE_VIDEO_SINK);
 
+/* GstPixelflutsink properties */
+enum
+{
+  PROP_0,
+  PROP_HOST,
+  PROP_PORT,
+};
+
+#define DEFAULT_PORT 1337
+#define DEFAULT_HOST "localhost"
+
 /* Define a generic SINKPAD template */
 static GstStaticPadTemplate gst_pixelflut_sink_template =
 GST_STATIC_PAD_TEMPLATE ("sink",
@@ -39,13 +50,30 @@ GST_STATIC_PAD_TEMPLATE ("sink",
     GST_STATIC_CAPS_ANY
     );
 
+static void gst_pixelflutsink_set_property (GObject *object, guint prop_id, const GValue *value, GParamSpec *pspec);
+static void gst_pixelflutsink_get_property (GObject *object, guint prop_id, GValue *value, GParamSpec *pspec);
+
 static void
 gst_pixelflutsink_class_init (GstPixelflutSinkClass *klass)
 {
+  GObjectClass *gobject_class = (GObjectClass *) klass;
   GstElementClass *element_class = (GstElementClass *) klass;
 
   /* allows filtering debug output with GST_DEBUG=pixelflut*:DEBUG */
   GST_DEBUG_CATEGORY_INIT (pixelflutsink_debug, "pixelflutsink", 0, "pixelflutsink");
+
+  /* overwrite virtual GObject functions */
+  gobject_class->set_property = gst_pixelflutsink_set_property;
+  gobject_class->get_property = gst_pixelflutsink_get_property;
+
+  /* install plugin properties */
+  g_object_class_install_property (gobject_class, PROP_HOST,
+      g_param_spec_string ("host", "Host", "The host/IP to send the packets to",
+          DEFAULT_HOST, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_PORT,
+      g_param_spec_int ("port", "Port", "The port to send the packets to",
+          0, 65535, DEFAULT_PORT,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   gst_element_class_set_static_metadata (element_class,
       "Pixelflut Sink", "Sink/Video/Network",
@@ -58,5 +86,56 @@ gst_pixelflutsink_class_init (GstPixelflutSinkClass *klass)
 static void
 gst_pixelflutsink_init (GstPixelflutSink *self)
 {
+  self->host = g_strdup (DEFAULT_HOST);
+  self->port = DEFAULT_PORT;
+
   GST_DEBUG_OBJECT (self, "inited");
 }
+
+static void
+gst_pixelflutsink_set_property (GObject *object, guint prop_id, const GValue *value, GParamSpec *pspec)
+{
+  GstPixelflutSink *self = GST_PIXELFLUTSINK (object);
+  GST_OBJECT_LOCK (self);
+
+  switch (prop_id) {
+    case PROP_HOST:
+      if (!g_value_get_string (value)) {
+        g_warning ("host property cannot be NULL");
+        break;
+      }
+      g_free (self->host);
+      self->host = g_value_dup_string (value);
+      GST_DEBUG ("set host property to '%s'", self->host);
+      break;
+    case PROP_PORT:
+      self->port = g_value_get_int (value);
+      GST_DEBUG ("set port property to %d", self->port);
+      break;
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+  }
+  GST_OBJECT_UNLOCK (self);
+}
+
+static void
+gst_pixelflutsink_get_property (GObject *object, guint prop_id, GValue *value, GParamSpec *pspec)
+{
+  GstPixelflutSink *self = GST_PIXELFLUTSINK (object);
+
+  GST_OBJECT_LOCK (self);
+  switch (prop_id) {
+    case PROP_HOST:
+      g_value_set_string (value, self->host);
+      break;
+    case PROP_PORT:
+      g_value_set_int (value, self->port);
+      break;
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+  }
+  GST_OBJECT_UNLOCK (self);
+}
+

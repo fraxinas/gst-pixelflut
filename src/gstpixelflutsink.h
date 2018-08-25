@@ -37,8 +37,13 @@ G_DECLARE_FINAL_TYPE (GstPixelflutSink, gst_pixelflutsink, GST, PIXELFLUTSINK, G
 struct _GstPixelflutSink
 {
   GstVideoSink parent;
+
+  /* server information */
+  int port;
+  gchar *host;
 };
 
 G_END_DECLS
 
 #endif /* __GST_PIXELFLUTSINK_H__ */
+
