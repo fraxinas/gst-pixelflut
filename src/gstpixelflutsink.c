@@ -25,6 +25,9 @@
 
 #include "gstpixelflutsink.h"
 
+GST_DEBUG_CATEGORY_STATIC (pixelflutsink_debug);
+#define GST_CAT_DEFAULT pixelflutsink_debug
+
 /* Use the GstVideoSink Base class */
 G_DEFINE_TYPE (GstPixelflutSink, gst_pixelflutsink, GST_TYPE_VIDEO_SINK);
 
@@ -32,6 +35,9 @@ static void
 gst_pixelflutsink_class_init (GstPixelflutSinkClass *klass)
 {
   GstElementClass *element_class = (GstElementClass *) klass;
+
+  /* allows filtering debug output with GST_DEBUG=pixelflut*:DEBUG */
+  GST_DEBUG_CATEGORY_INIT (pixelflutsink_debug, "pixelflutsink", 0, "pixelflutsink");
 
   gst_element_class_set_static_metadata (element_class,
       "Pixelflut Sink", "Sink/Video/Network",
