@@ -57,12 +57,15 @@ static void gst_pixelflutsink_set_property (GObject *object, guint prop_id, cons
 static void gst_pixelflutsink_get_property (GObject *object, guint prop_id, GValue *value, GParamSpec *pspec);
 static void gst_pixelflutsink_finalize (GObject *object);
 
+static GstFlowReturn gst_pixelflutsink_send_frame (GstVideoSink * videosink, GstBuffer * buffer);
+
 static void
 gst_pixelflutsink_class_init (GstPixelflutSinkClass *klass)
 {
   GObjectClass *gobject_class = (GObjectClass *) klass;
   GstElementClass *element_class = (GstElementClass *) klass;
   GstBaseSinkClass *gstbasesink_class = (GstBaseSinkClass *) klass;
+  GstVideoSinkClass *gstvideosink_class = (GstVideoSinkClass *) klass;
 
   /* allows filtering debug output with GST_DEBUG=pixelflut*:DEBUG */
   GST_DEBUG_CATEGORY_INIT (pixelflutsink_debug, "pixelflutsink", 0, "pixelflutsink");
@@ -91,6 +94,9 @@ gst_pixelflutsink_class_init (GstPixelflutSinkClass *klass)
   /* overwrite virtual GstBaseSink functions */
   gstbasesink_class->start = GST_DEBUG_FUNCPTR (gst_pixelflutsink_start);
   gstbasesink_class->stop = GST_DEBUG_FUNCPTR (gst_pixelflutsink_stop);
+
+  /* overwrite virtual GstVideoSink functions */
+  gstvideosink_class->show_frame = GST_DEBUG_FUNCPTR (gst_pixelflutsink_send_frame);
 }
 
 static void
@@ -220,3 +226,12 @@ gst_pixelflutsink_stop (GstBaseSink * bsink)
   return TRUE;
 }
 
+static GstFlowReturn
+gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
+{
+  GstPixelflutSink *self = GST_PIXELFLUTSINK (vsink);
+
+  GST_LOG_OBJECT (self, "pretending to send %" GST_PTR_FORMAT, buffer);
+
+  return GST_FLOW_OK;
+}
