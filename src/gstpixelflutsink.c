@@ -31,6 +31,14 @@ GST_DEBUG_CATEGORY_STATIC (pixelflutsink_debug);
 /* Use the GstVideoSink Base class */
 G_DEFINE_TYPE (GstPixelflutSink, gst_pixelflutsink, GST_TYPE_VIDEO_SINK);
 
+/* Define a generic SINKPAD template */
+static GstStaticPadTemplate gst_pixelflut_sink_template =
+GST_STATIC_PAD_TEMPLATE ("sink",
+    GST_PAD_SINK,
+    GST_PAD_ALWAYS,
+    GST_STATIC_CAPS_ANY
+    );
+
 static void
 gst_pixelflutsink_class_init (GstPixelflutSinkClass *klass)
 {
@@ -42,6 +50,9 @@ gst_pixelflutsink_class_init (GstPixelflutSinkClass *klass)
   gst_element_class_set_static_metadata (element_class,
       "Pixelflut Sink", "Sink/Video/Network",
       "Sends raw video frames to a Pixelflut server", "Andreas Frisch <fraxinas@schaffenburg.org>");
+
+  gst_element_class_add_pad_template (element_class,
+      gst_static_pad_template_get (&gst_pixelflut_sink_template));
 }
 
 static void
