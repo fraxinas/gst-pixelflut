@@ -50,6 +50,9 @@ GST_STATIC_PAD_TEMPLATE ("sink",
     GST_STATIC_CAPS_ANY
     );
 
+static gboolean gst_pixelflutsink_start (GstBaseSink * bsink);
+static gboolean gst_pixelflutsink_stop (GstBaseSink * bsink);
+
 static void gst_pixelflutsink_set_property (GObject *object, guint prop_id, const GValue *value, GParamSpec *pspec);
 static void gst_pixelflutsink_get_property (GObject *object, guint prop_id, GValue *value, GParamSpec *pspec);
 static void gst_pixelflutsink_finalize (GObject *object);
@@ -59,6 +62,7 @@ gst_pixelflutsink_class_init (GstPixelflutSinkClass *klass)
 {
   GObjectClass *gobject_class = (GObjectClass *) klass;
   GstElementClass *element_class = (GstElementClass *) klass;
+  GstBaseSinkClass *gstbasesink_class = (GstBaseSinkClass *) klass;
 
   /* allows filtering debug output with GST_DEBUG=pixelflut*:DEBUG */
   GST_DEBUG_CATEGORY_INIT (pixelflutsink_debug, "pixelflutsink", 0, "pixelflutsink");
@@ -83,6 +87,10 @@ gst_pixelflutsink_class_init (GstPixelflutSinkClass *klass)
 
   gst_element_class_add_pad_template (element_class,
       gst_static_pad_template_get (&gst_pixelflut_sink_template));
+
+  /* overwrite virtual GstBaseSink functions */
+  gstbasesink_class->start = GST_DEBUG_FUNCPTR (gst_pixelflutsink_start);
+  gstbasesink_class->stop = GST_DEBUG_FUNCPTR (gst_pixelflutsink_stop);
 }
 
 static void
@@ -90,6 +98,8 @@ gst_pixelflutsink_init (GstPixelflutSink *self)
 {
   self->host = g_strdup (DEFAULT_HOST);
   self->port = DEFAULT_PORT;
+
+  self->is_open = FALSE;
 
   GST_DEBUG_OBJECT (self, "inited");
 }
@@ -151,5 +161,62 @@ gst_pixelflutsink_get_property (GObject *object, guint prop_id, GValue *value, G
       break;
   }
   GST_OBJECT_UNLOCK (self);
+}
+
+static gboolean
+gst_pixelflutsink_start (GstBaseSink * bsink)
+{
+  GstPixelflutSink *self = GST_PIXELFLUTSINK (bsink);
+  gboolean is_open;
+  gboolean ret = FALSE;
+
+  GST_DEBUG_OBJECT (self, "starting");
+
+  GST_OBJECT_LOCK (self);
+  is_open = self->is_open;
+  GST_OBJECT_UNLOCK (self);
+
+  if (is_open) {
+    ret = TRUE;
+    goto cleanup;
+  }
+
+  /* Start processing - open resources here */
+
+  ret = TRUE;
+  goto cleanup;
+
+cleanup:
+  {
+    GST_OBJECT_LOCK (self);
+    self->is_open = ret;
+    GST_OBJECT_UNLOCK (self);
+
+    return ret;
+  }
+}
+
+static gboolean
+gst_pixelflutsink_stop (GstBaseSink * bsink)
+{
+  GstPixelflutSink *self = GST_PIXELFLUTSINK (bsink);
+  gboolean is_open;
+
+  GST_DEBUG_OBJECT (self, "stop");
+
+  GST_OBJECT_LOCK (self);
+  is_open = self->is_open;
+  GST_OBJECT_UNLOCK (self);
+
+  if (is_open)
+    return TRUE;
+
+  /* Stop processing - close resources here */
+
+  GST_OBJECT_LOCK (self);
+  self->is_open = FALSE;
+  GST_OBJECT_UNLOCK (self);
+
+  return TRUE;
 }
 

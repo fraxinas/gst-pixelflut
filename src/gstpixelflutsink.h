@@ -41,6 +41,9 @@ struct _GstPixelflutSink
   /* server information */
   int port;
   gchar *host;
+
+  /* socket */
+  gboolean is_open;
 };
 
 G_END_DECLS
