@@ -47,11 +47,14 @@ static GstStaticPadTemplate gst_pixelflut_sink_template =
 GST_STATIC_PAD_TEMPLATE ("sink",
     GST_PAD_SINK,
     GST_PAD_ALWAYS,
-    GST_STATIC_CAPS_ANY
+    GST_STATIC_CAPS (GST_VIDEO_CAPS_MAKE ("{ "
+            "ARGB, BGRA, ABGR, RGBA, xRGB,"
+            "RGBx, xBGR, BGRx, RGB, BGR }"))
     );
 
 static gboolean gst_pixelflutsink_start (GstBaseSink * bsink);
 static gboolean gst_pixelflutsink_stop (GstBaseSink * bsink);
+static gboolean gst_pixelflutsink_setcaps (GstBaseSink * bsink, GstCaps * caps);
 
 static void gst_pixelflutsink_set_property (GObject *object, guint prop_id, const GValue *value, GParamSpec *pspec);
 static void gst_pixelflutsink_get_property (GObject *object, guint prop_id, GValue *value, GParamSpec *pspec);
@@ -94,6 +97,7 @@ gst_pixelflutsink_class_init (GstPixelflutSinkClass *klass)
   /* overwrite virtual GstBaseSink functions */
   gstbasesink_class->start = GST_DEBUG_FUNCPTR (gst_pixelflutsink_start);
   gstbasesink_class->stop = GST_DEBUG_FUNCPTR (gst_pixelflutsink_stop);
+  gstbasesink_class->set_caps = GST_DEBUG_FUNCPTR (gst_pixelflutsink_setcaps);
 
   /* overwrite virtual GstVideoSink functions */
   gstvideosink_class->show_frame = GST_DEBUG_FUNCPTR (gst_pixelflutsink_send_frame);
@@ -122,12 +126,37 @@ static void gst_pixelflutsink_finalize (GObject *object)
   G_OBJECT_CLASS (gst_pixelflutsink_parent_class)->finalize (object);
 }
 
+static gboolean
+gst_pixelflutsink_setcaps (GstBaseSink * basesink, GstCaps * caps)
+{
+  GstPixelflutSink *self = GST_PIXELFLUTSINK (basesink);
+  GstVideoInfo info;
+
+  GST_DEBUG_OBJECT (self, "setcaps %" GST_PTR_FORMAT, caps);
+
+  if (!gst_video_info_from_caps (&info, caps))
+    goto invalid_caps;
+
+  GST_OBJECT_LOCK (self);
+  self->info = info;
+  GST_OBJECT_UNLOCK (self);
+
+  return TRUE;
+
+  /* ERRORS */
+invalid_caps:
+  {
+    GST_ERROR_OBJECT (self, "invalid caps");
+    return FALSE;
+  }
+}
+
 static void
 gst_pixelflutsink_set_property (GObject *object, guint prop_id, const GValue *value, GParamSpec *pspec)
 {
   GstPixelflutSink *self = GST_PIXELFLUTSINK (object);
-  GST_OBJECT_LOCK (self);
 
+  GST_OBJECT_LOCK (self);
   switch (prop_id) {
     case PROP_HOST:
       if (!g_value_get_string (value)) {

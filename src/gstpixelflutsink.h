@@ -22,6 +22,7 @@
 #define __GST_PIXELFLUTSINK_H__
 
 #include <gst/gst.h>
+#include <gst/video/video.h>
 #include <gst/video/gstvideosink.h>
 
 G_BEGIN_DECLS
@@ -37,6 +38,9 @@ G_DECLARE_FINAL_TYPE (GstPixelflutSink, gst_pixelflutsink, GST, PIXELFLUTSINK, G
 struct _GstPixelflutSink
 {
   GstVideoSink parent;
+
+  /* video information */
+  GstVideoInfo info;
 
   /* server information */
   int port;
