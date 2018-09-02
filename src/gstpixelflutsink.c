@@ -52,6 +52,7 @@ GST_STATIC_PAD_TEMPLATE ("sink",
 
 static void gst_pixelflutsink_set_property (GObject *object, guint prop_id, const GValue *value, GParamSpec *pspec);
 static void gst_pixelflutsink_get_property (GObject *object, guint prop_id, GValue *value, GParamSpec *pspec);
+static void gst_pixelflutsink_finalize (GObject *object);
 
 static void
 gst_pixelflutsink_class_init (GstPixelflutSinkClass *klass)
@@ -65,6 +66,7 @@ gst_pixelflutsink_class_init (GstPixelflutSinkClass *klass)
   /* overwrite virtual GObject functions */
   gobject_class->set_property = gst_pixelflutsink_set_property;
   gobject_class->get_property = gst_pixelflutsink_get_property;
+  gobject_class->finalize     = gst_pixelflutsink_finalize;
 
   /* install plugin properties */
   g_object_class_install_property (gobject_class, PROP_HOST,
@@ -90,6 +92,18 @@ gst_pixelflutsink_init (GstPixelflutSink *self)
   self->port = DEFAULT_PORT;
 
   GST_DEBUG_OBJECT (self, "inited");
+}
+
+static void gst_pixelflutsink_finalize (GObject *object)
+{
+  GstPixelflutSink *self = GST_PIXELFLUTSINK (object);
+
+  g_free (self->host);
+
+  GST_INFO_OBJECT (self, "finalized");
+
+  /* "chain up" to base class method */
+  G_OBJECT_CLASS (gst_pixelflutsink_parent_class)->finalize (object);
 }
 
 static void
