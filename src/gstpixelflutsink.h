@@ -43,6 +43,13 @@ struct _GstPixelflutSink
   /* video information */
   GstVideoInfo info;
 
+  gint offset_top;
+  gint offset_left;
+
+  /* metrics */
+  size_t bytes_written;
+  gint frames_sent;
+
   /* server information */
   int port;
   gchar *host;

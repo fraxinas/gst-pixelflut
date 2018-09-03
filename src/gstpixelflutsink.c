@@ -37,6 +37,10 @@ enum
   PROP_0,
   PROP_HOST,
   PROP_PORT,
+  PROP_OFFSET_TOP,
+  PROP_OFFSET_LEFT,
+  PROP_FRAMES_SENT,
+  PROP_BYTES_WRITTEN,
 };
 
 #define DEFAULT_PORT 1337
@@ -88,6 +92,22 @@ gst_pixelflutsink_class_init (GstPixelflutSinkClass *klass)
       g_param_spec_int ("port", "Port", "The port to send the packets to",
           0, 65535, DEFAULT_PORT,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_OFFSET_TOP,
+      g_param_spec_int ("offset-top",
+          "Offset Top", "Offset in pixel from the top of canvas", G_MININT, G_MAXINT, 0,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | GST_PARAM_MUTABLE_PLAYING));
+  g_object_class_install_property (gobject_class, PROP_OFFSET_LEFT,
+      g_param_spec_int ("offset-left",
+          "Offset Left", "Offset in pixel from left side of the canvas", G_MININT, G_MAXINT, 0,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | GST_PARAM_MUTABLE_PLAYING));
+  g_object_class_install_property (gobject_class, PROP_FRAMES_SENT,
+      g_param_spec_int ("frames-sent",
+          "Frames sent", "Number of frames sent", G_MININT, G_MAXINT, 0,
+          G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_BYTES_WRITTEN,
+      g_param_spec_int ("bytes-written",
+          "Bytes written", "Number of bytes written", G_MININT, G_MAXINT, 0,
+          G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
 
   gst_element_class_set_static_metadata (element_class,
       "Pixelflut Sink", "Sink/Video/Network",
@@ -110,6 +130,9 @@ gst_pixelflutsink_class_init (GstPixelflutSinkClass *klass)
 static void
 gst_pixelflutsink_init (GstPixelflutSink *self)
 {
+  self->offset_top = 0;
+  self->offset_left = 0;
+
   self->host = g_strdup (DEFAULT_HOST);
   self->port = DEFAULT_PORT;
 
@@ -130,7 +153,7 @@ static void gst_pixelflutsink_finalize (GObject *object)
 
   g_free (self->host);
 
-  GST_INFO_OBJECT (self, "finalized");
+  GST_INFO_OBJECT (self, "finalized. sent %i frames and %" G_GSIZE_FORMAT " bytes", self->frames_sent, self->bytes_written);
 
   /* "chain up" to base class method */
   G_OBJECT_CLASS (gst_pixelflutsink_parent_class)->finalize (object);
@@ -181,6 +204,12 @@ gst_pixelflutsink_set_property (GObject *object, guint prop_id, const GValue *va
       self->port = g_value_get_int (value);
       GST_DEBUG ("set port property to %d", self->port);
       break;
+    case PROP_OFFSET_LEFT:
+      self->offset_left = g_value_get_int (value);
+      break;
+    case PROP_OFFSET_TOP:
+      self->offset_top = g_value_get_int (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -200,6 +229,18 @@ gst_pixelflutsink_get_property (GObject *object, guint prop_id, GValue *value, G
       break;
     case PROP_PORT:
       g_value_set_int (value, self->port);
+      break;
+    case PROP_FRAMES_SENT:
+      g_value_set_int (value, self->frames_sent);
+      break;
+    case PROP_BYTES_WRITTEN:
+      g_value_set_int (value, self->bytes_written);
+      break;
+    case PROP_OFFSET_TOP:
+      g_value_set_int (value, self->offset_top);
+      break;
+    case PROP_OFFSET_LEFT:
+      g_value_set_int (value, self->offset_left);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -290,6 +331,7 @@ gst_pixelflutsink_start (GstBaseSink * bsink)
 
   GST_OBJECT_LOCK (self);
   self->is_open = TRUE;
+  self->bytes_written = 0;
   self->socket = g_object_ref (socket);
   GST_OBJECT_UNLOCK (self);
 
@@ -419,6 +461,7 @@ gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
   GstPixelflutSink *self = GST_PIXELFLUTSINK (vsink);
   GstVideoInfo info;
   GstVideoFrame frame;
+  gint offset_left, offset_top;
   guint8 *data;
   gint offsets[3];   // offsets of color bytes in the pixel
   gint height, width;// frame dimensions
@@ -433,6 +476,8 @@ gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
   gsize frame_written = 0;
 
   GST_OBJECT_LOCK (self);
+  offset_left = self->offset_left;
+  offset_top = self->offset_top;
   info = self->info;
   is_open = self->is_open;
   socket = self->socket;
@@ -462,7 +507,7 @@ gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
       for (x = 0; x < width; x++) {
         g_snprintf (outbuf, 22,
                     "PX %d %d %02x%02x%02x\n",
-                    x, y,
+                    x+offset_left, y+offset_top,
                     data[offsets[0]],
                     data[offsets[1]],
                     data[offsets[2]]);
@@ -484,6 +529,11 @@ gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
     }
   }
   gst_video_frame_unmap (&frame);
+
+  GST_OBJECT_LOCK (self);
+  self->bytes_written += frame_written;
+  self->frames_sent++;
+  GST_OBJECT_UNLOCK (self);
 
   GST_LOG_OBJECT (self, "frame finished. %" G_GSIZE_FORMAT "bytes sent.", frame_written);
 
