@@ -18,6 +18,21 @@
  * Boston, MA 02110-1301, USA.
  */
 
+/**
+ * SECTION:element-pixelflutsink
+ * @short_description: Fluts a pixelflut server.
+ *
+ * This plugin will accept raw video frames and send them to a
+ * pixelflut server such as https://github.com/defnull/pixelflut
+ *
+ * <refsect2>
+ * <title>Example launch lines</title>
+ * <para>(write everything in one line, without the backslash characters)</para>
+ * |[
+ * gst-launch-1.0 videotestsrc ! videoconvert ! pixelflutsink host=10.42.23.69 port=1337
+ * ]| This will flut the corresponding server with test screens
+ * </refsect2>
+ */
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
