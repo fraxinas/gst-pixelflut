@@ -45,6 +45,8 @@ struct _GstPixelflutSink
 
   gint offset_top;
   gint offset_left;
+  guint canvas_width;
+  guint canvas_height;
 
   /* metrics */
   size_t bytes_written;

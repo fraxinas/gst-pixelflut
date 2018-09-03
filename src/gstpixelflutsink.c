@@ -23,6 +23,8 @@
 #include "config.h"
 #endif
 
+#include <stdio.h>
+
 #include "gstpixelflutsink.h"
 
 GST_DEBUG_CATEGORY_STATIC (pixelflutsink_debug);
@@ -42,11 +44,14 @@ enum
   PROP_FRAMES_SENT,
   PROP_BYTES_WRITTEN,
   PROP_PIXELS_PER_PACKET,
+  PROP_CANVAS_WIDTH,
+  PROP_CANVAS_HEIGHT,
 };
 
 #define DEFAULT_PORT 1337
 #define DEFAULT_HOST "localhost"
 #define DEFAULT_PPP 10
+#define CANVAS_MAX 9999
 
 /* Define a generic SINKPAD template */
 static GstStaticPadTemplate gst_pixelflut_sink_template =
@@ -114,6 +119,14 @@ gst_pixelflutsink_class_init (GstPixelflutSinkClass *klass)
       g_param_spec_uint ("ppp",
           "Pixels per packet", "How many pixels to transmit at once", 0, 10000, DEFAULT_PPP,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | GST_PARAM_MUTABLE_PLAYING));
+  g_object_class_install_property (gobject_class, PROP_CANVAS_WIDTH,
+      g_param_spec_uint ("canvas-width",
+          "Canvas width", "Width of Pixelflut server's canvas in pixels", 0, CANVAS_MAX, 0,
+          G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_CANVAS_HEIGHT,
+      g_param_spec_uint ("canvas-height",
+          "Canvas height", "Height of Pixelflut server's canvas in pixels", 0, CANVAS_MAX, 0,
+          G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
 
   gst_element_class_set_static_metadata (element_class,
       "Pixelflut Sink", "Sink/Video/Network",
@@ -257,6 +270,12 @@ gst_pixelflutsink_get_property (GObject *object, guint prop_id, GValue *value, G
     case PROP_PIXELS_PER_PACKET:
       g_value_set_uint (value, self->pixels_per_packet);
       break;
+    case PROP_CANVAS_WIDTH:
+      g_value_set_uint (value, self->canvas_width);
+      break;
+    case PROP_CANVAS_HEIGHT:
+      g_value_set_uint (value, self->canvas_height);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -338,16 +357,27 @@ gst_pixelflutsink_start (GstBaseSink * bsink)
 
   gchar readbuf[16];
   gsize rret;
+  int scanret, x, y;
   rret = g_socket_receive (socket, readbuf, sizeof(readbuf), self->cancellable, &err);
   if (rret < 8)
     goto size_failed;
   readbuf[rret-1] = '\0';
-  GST_DEBUG_OBJECT (self, "canvas %s", readbuf);
+
+  scanret = sscanf(readbuf, "SIZE %d%d", &x, &y);
+  if (scanret == 2) {
+    GST_INFO_OBJECT (self, "canvas size is (%dx%d)", x, y);
+  } else {
+    err = g_error_new (GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_FAILED,
+      "Couldn't parse canvas reply '%s'", readbuf);
+    goto size_failed;
+  }
 
   GST_OBJECT_LOCK (self);
   self->is_open = TRUE;
   self->bytes_written = 0;
   self->socket = g_object_ref (socket);
+  self->canvas_width = x;
+  self->canvas_height = y;
   GST_OBJECT_UNLOCK (self);
 
   ret = TRUE;
@@ -477,6 +507,7 @@ gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
   GstVideoInfo info;
   GstVideoFrame frame;
   gint offset_left, offset_top;
+  guint canvas_w, canvas_h;
   guint8 *data;
   gint offsets[3];   // offsets of color bytes in the pixel
   gint height, width;// frame dimensions
@@ -500,9 +531,11 @@ gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
   is_open = self->is_open;
   socket = self->socket;
   ppp = self->pixels_per_packet;
+  canvas_w = self->canvas_width;
+  canvas_h = self->canvas_height;
   GST_OBJECT_UNLOCK (self);
 
-  gchar outbuf[20*ppp+1];  // to assemble the pixeflut command
+  gchar outbuf[22*ppp+1];  // to assemble the pixeflut command
 
   g_return_val_if_fail (is_open, GST_FLOW_FLUSHING);
 
@@ -524,9 +557,9 @@ gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
   row_wrap = plane_stride - pixel_stride * width;
 
   if (1) { // strategy line_by_line
-    for (y = 0; y < height; y++) {
-      for (x = 0; x < width; x++) {
-        g_snprintf (outbuf+packet_offset, 20,
+    for (y = 0; (y < height && y+offset_top <= canvas_h); y++) {
+      for (x = 0; (x < width && x+offset_left <= canvas_w); x++) {
+        g_snprintf (outbuf+packet_offset, 22,
                     "PX %d %d %02x%02x%02x\n",
                     x+offset_left, y+offset_top,
                     data[offsets[0]],
