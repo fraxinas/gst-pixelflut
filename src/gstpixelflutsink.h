@@ -22,6 +22,7 @@
 #define __GST_PIXELFLUTSINK_H__
 
 #include <gst/gst.h>
+#include <gio/gio.h>
 #include <gst/video/video.h>
 #include <gst/video/gstvideosink.h>
 
@@ -47,6 +48,8 @@ struct _GstPixelflutSink
   gchar *host;
 
   /* socket */
+  GSocket *socket;
+  GCancellable *cancellable;
   gboolean is_open;
 };
 
