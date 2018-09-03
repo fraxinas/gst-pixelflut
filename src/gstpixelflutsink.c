@@ -259,8 +259,67 @@ static GstFlowReturn
 gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
 {
   GstPixelflutSink *self = GST_PIXELFLUTSINK (vsink);
+  GstVideoInfo info;
+  GstVideoFrame frame;
+  guint8 *data;
+  gint offsets[3];   // offsets of color bytes in the pixel
+  gint height, width;// frame dimensions
+  gint plane_stride; // number of bytes per row
+  gint pixel_stride; // number of bytes per pixel
+  gint x, y;         // coordinate iterators
+  gint row_wrap;     // to skip padding bytes in rows
+  gchar outbuf[22];  // to assemble the pixeflut command
+  gsize frame_written = 0;
 
-  GST_LOG_OBJECT (self, "pretending to send %" GST_PTR_FORMAT, buffer);
+  GST_OBJECT_LOCK (self);
+  info = self->info;
+  GST_OBJECT_UNLOCK (self);
+
+  /* Fill GstVideoFrame structure so that pixel data can accessed */
+  if (!gst_video_frame_map (&frame, &info, buffer, GST_MAP_READ))
+    goto invalid_frame;
+
+  data = (guint8 *) GST_VIDEO_FRAME_PLANE_DATA (&frame, 0);
+
+  plane_stride = GST_VIDEO_FRAME_PLANE_STRIDE (&frame, 0);
+  width = GST_VIDEO_FRAME_COMP_WIDTH (&frame, 0);
+  height = GST_VIDEO_FRAME_COMP_HEIGHT (&frame, 0);
+  pixel_stride = GST_VIDEO_FRAME_COMP_PSTRIDE (&frame, 0);
+
+  offsets[0] = GST_VIDEO_FRAME_COMP_OFFSET (&frame, 0);
+  offsets[1] = GST_VIDEO_FRAME_COMP_OFFSET (&frame, 1);
+  offsets[2] = GST_VIDEO_FRAME_COMP_OFFSET (&frame, 2);
+
+  row_wrap = plane_stride - pixel_stride * width;
+
+  if (1) { // strategy line_by_line
+    for (y = 0; y < height; y++) {
+      for (x = 0; x < width; x++) {
+        g_snprintf (outbuf, 22,
+                    "PX %d %d %02x%02x%02x\n",
+                    x, y,
+                    data[offsets[0]],
+                    data[offsets[1]],
+                    data[offsets[2]]);
+
+        GST_TRACE_OBJECT (self, "wrote: %s", outbuf);
+        frame_written += strlen(outbuf);
+
+        data += pixel_stride;
+      }
+      data += row_wrap;
+    }
+  }
+  gst_video_frame_unmap (&frame);
+
+  GST_LOG_OBJECT (self, "frame finished. %" G_GSIZE_FORMAT " bytes would be written", frame_written);
 
   return GST_FLOW_OK;
+
+  /* ERRORS */
+invalid_frame:
+  {
+    GST_WARNING_OBJECT (self, "invalid frame");
+    return GST_FLOW_ERROR;
+  }
 }
