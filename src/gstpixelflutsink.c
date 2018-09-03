@@ -41,10 +41,12 @@ enum
   PROP_OFFSET_LEFT,
   PROP_FRAMES_SENT,
   PROP_BYTES_WRITTEN,
+  PROP_PIXELS_PER_PACKET,
 };
 
 #define DEFAULT_PORT 1337
 #define DEFAULT_HOST "localhost"
+#define DEFAULT_PPP 10
 
 /* Define a generic SINKPAD template */
 static GstStaticPadTemplate gst_pixelflut_sink_template =
@@ -108,6 +110,10 @@ gst_pixelflutsink_class_init (GstPixelflutSinkClass *klass)
       g_param_spec_int ("bytes-written",
           "Bytes written", "Number of bytes written", G_MININT, G_MAXINT, 0,
           G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_PIXELS_PER_PACKET,
+      g_param_spec_uint ("ppp",
+          "Pixels per packet", "How many pixels to transmit at once", 0, 10000, DEFAULT_PPP,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | GST_PARAM_MUTABLE_PLAYING));
 
   gst_element_class_set_static_metadata (element_class,
       "Pixelflut Sink", "Sink/Video/Network",
@@ -139,6 +145,8 @@ gst_pixelflutsink_init (GstPixelflutSink *self)
   self->socket = NULL;
   self->cancellable = g_cancellable_new ();
 
+  self->pixels_per_packet = DEFAULT_PPP;
+
   self->is_open = FALSE;
 
   GST_DEBUG_OBJECT (self, "inited");
@@ -153,7 +161,8 @@ static void gst_pixelflutsink_finalize (GObject *object)
 
   g_free (self->host);
 
-  GST_INFO_OBJECT (self, "finalized. sent %i frames and %" G_GSIZE_FORMAT " bytes", self->frames_sent, self->bytes_written);
+  GST_INFO_OBJECT (self, "finalized. sent %i frames and %" G_GSIZE_FORMAT
+                   " bytes", self->frames_sent, self->bytes_written);
 
   /* "chain up" to base class method */
   G_OBJECT_CLASS (gst_pixelflutsink_parent_class)->finalize (object);
@@ -210,6 +219,9 @@ gst_pixelflutsink_set_property (GObject *object, guint prop_id, const GValue *va
     case PROP_OFFSET_TOP:
       self->offset_top = g_value_get_int (value);
       break;
+    case PROP_PIXELS_PER_PACKET:
+      self->pixels_per_packet = g_value_get_uint (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -241,6 +253,9 @@ gst_pixelflutsink_get_property (GObject *object, guint prop_id, GValue *value, G
       break;
     case PROP_OFFSET_LEFT:
       g_value_set_int (value, self->offset_left);
+      break;
+    case PROP_PIXELS_PER_PACKET:
+      g_value_set_uint (value, self->pixels_per_packet);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -469,10 +484,13 @@ gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
   gint pixel_stride; // number of bytes per pixel
   gint x, y;         // coordinate iterators
   gint row_wrap;     // to skip padding bytes in rows
-  gchar outbuf[22];  // to assemble the pixeflut command
+  guint ppp, ppp_count = 0; // pixels per packet
+  gsize packet_offset = 0;  // for fragmented sending
   GError *err = NULL;
   gboolean is_open;
   GSocket *socket;
+  gint fragments_count = 0;
+  gssize fragment_written = 0;
   gsize frame_written = 0;
 
   GST_OBJECT_LOCK (self);
@@ -481,7 +499,10 @@ gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
   info = self->info;
   is_open = self->is_open;
   socket = self->socket;
+  ppp = self->pixels_per_packet;
   GST_OBJECT_UNLOCK (self);
+
+  gchar outbuf[20*ppp+1];  // to assemble the pixeflut command
 
   g_return_val_if_fail (is_open, GST_FLOW_FLUSHING);
 
@@ -505,24 +526,39 @@ gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
   if (1) { // strategy line_by_line
     for (y = 0; y < height; y++) {
       for (x = 0; x < width; x++) {
-        g_snprintf (outbuf, 22,
+        g_snprintf (outbuf+packet_offset, 20,
                     "PX %d %d %02x%02x%02x\n",
                     x+offset_left, y+offset_top,
                     data[offsets[0]],
                     data[offsets[1]],
                     data[offsets[2]]);
 
-        { /* this is hacky, we assume the command can be sent without fragmentation */
-          gssize wret;
-          wret =
-            g_socket_send (socket, outbuf,
-            strlen(outbuf), self->cancellable, &err);
-          if (wret < 0)
-            goto write_error;
-          frame_written += wret;
-          GST_TRACE_OBJECT (self, "sent: %s wret=%" G_GSSIZE_FORMAT " frame_written=%" G_GSIZE_FORMAT, outbuf, wret, frame_written);
-        }
+        packet_offset = strlen(outbuf);
 
+        if (ppp_count && ppp_count % ppp == 0) {
+          fragment_written = 0;
+          while (fragment_written < packet_offset) {
+            gssize wret;
+            fragments_count++;
+            wret =
+              g_socket_send (socket, outbuf + fragment_written,
+              packet_offset - fragment_written, self->cancellable, &err);
+            if (wret < 0) {
+              goto write_error;
+            }
+            fragment_written += wret;
+            if (gst_debug_category_get_threshold (pixelflutsink_debug) >= GST_LEVEL_MEMDUMP) {
+              GST_TRACE_OBJECT (self, "sent: %s", outbuf);
+            }
+            GST_TRACE_OBJECT (self, "sent: wret=%" G_GSSIZE_FORMAT " fragment_written=%"
+                              G_GSSIZE_FORMAT " frame_written=%" G_GSIZE_FORMAT " fragments_count=%d",
+                              wret, fragment_written, frame_written, fragments_count);
+            packet_offset = 0;
+            ppp_count = 0;
+          }
+          frame_written += fragment_written;
+        }
+        ppp_count++;
         data += pixel_stride;
       }
       data += row_wrap;
@@ -535,7 +571,8 @@ gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
   self->frames_sent++;
   GST_OBJECT_UNLOCK (self);
 
-  GST_LOG_OBJECT (self, "frame finished. %" G_GSIZE_FORMAT "bytes sent.", frame_written);
+  GST_LOG_OBJECT (self, "frame finished. %" G_GSIZE_FORMAT "bytes sent in %d fragments",
+                  frame_written, fragments_count);
 
   return GST_FLOW_OK;
 
@@ -556,7 +593,7 @@ write_error:
       GST_ELEMENT_ERROR (self, RESOURCE, WRITE,
           ("Error while sending data."),
           ("Only %" G_GSIZE_FORMAT " of %" G_GSIZE_FORMAT " bytes written: %s",
-              frame_written, strlen(outbuf), err->message));
+              fragment_written, strlen(outbuf), err->message));
       ret = GST_FLOW_ERROR;
     }
     gst_video_frame_unmap (&frame);

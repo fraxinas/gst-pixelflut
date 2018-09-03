@@ -58,6 +58,7 @@ struct _GstPixelflutSink
   GSocket *socket;
   GCancellable *cancellable;
   gboolean is_open;
+  guint pixels_per_packet;
 };
 
 G_END_DECLS
