@@ -515,6 +515,8 @@ gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
   gint pixel_stride; // number of bytes per pixel
   gint x, y;         // coordinate iterators
   gint row_wrap;     // to skip padding bytes in rows
+  gboolean has_alpha;// whether frame has alpha plane
+  gchar alpha_str[3];// optional suffix for transparency
   guint ppp, ppp_count = 0; // pixels per packet
   gsize packet_offset = 0;  // for fragmented sending
   GError *err = NULL;
@@ -543,6 +545,8 @@ gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
   if (!gst_video_frame_map (&frame, &info, buffer, GST_MAP_READ))
     goto invalid_frame;
 
+  has_alpha = GST_VIDEO_FORMAT_INFO_HAS_ALPHA (self->info.finfo);
+
   data = (guint8 *) GST_VIDEO_FRAME_PLANE_DATA (&frame, 0);
 
   plane_stride = GST_VIDEO_FRAME_PLANE_STRIDE (&frame, 0);
@@ -553,18 +557,31 @@ gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
   offsets[0] = GST_VIDEO_FRAME_COMP_OFFSET (&frame, 0);
   offsets[1] = GST_VIDEO_FRAME_COMP_OFFSET (&frame, 1);
   offsets[2] = GST_VIDEO_FRAME_COMP_OFFSET (&frame, 2);
+  if (has_alpha) {
+    offsets[3] = GST_VIDEO_FRAME_COMP_OFFSET (&frame, 3);
+  }
 
   row_wrap = plane_stride - pixel_stride * width;
 
   if (1) { // strategy line_by_line
     for (y = 0; (y < height && y+offset_top <= canvas_h); y++) {
       for (x = 0; (x < width && x+offset_left <= canvas_w); x++) {
+        if (has_alpha) {
+          guint8 val = data[offsets[3]];
+          if (val == 0x00) {
+            /* skip fully transparent pixel */
+            data += pixel_stride;
+            continue;
+          }
+          g_snprintf (alpha_str, 3, "%02x", val);
+        }
         g_snprintf (outbuf+packet_offset, 22,
-                    "PX %d %d %02x%02x%02x\n",
+                    "PX %d %d %02x%02x%02x%s\n",
                     x+offset_left, y+offset_top,
                     data[offsets[0]],
                     data[offsets[1]],
-                    data[offsets[2]]);
+                    data[offsets[2]],
+                    has_alpha ? alpha_str : "");
 
         packet_offset = strlen(outbuf);
 
