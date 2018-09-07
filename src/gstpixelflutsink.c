@@ -170,7 +170,6 @@ gst_pixelflutsink_init (GstPixelflutSink *self)
   self->host = g_strdup (DEFAULT_HOST);
   self->port = DEFAULT_PORT;
 
-  self->socket = NULL;
   self->cancellable = g_cancellable_new ();
 
   self->pixels_per_packet = DEFAULT_PPP;
@@ -185,7 +184,6 @@ static void gst_pixelflutsink_finalize (GObject *object)
   GstPixelflutSink *self = GST_PIXELFLUTSINK (object);
 
   g_clear_object (&self->cancellable);
-  g_clear_object (&self->socket);
 
   g_free (self->host);
 
@@ -298,27 +296,82 @@ gst_pixelflutsink_get_property (GObject *object, guint prop_id, GValue *value, G
   GST_OBJECT_UNLOCK (self);
 }
 
-static gboolean
-gst_pixelflutsink_start (GstBaseSink * bsink)
+static gboolean gst_pixelflutsink_establish_connection (GstPixelflutSink *self)
 {
-  GstPixelflutSink *self = GST_PIXELFLUTSINK (bsink);
-  GError *err = NULL;
-  GInetAddress *addr = NULL;
-  GSocketAddress *saddr = NULL;
-  GResolver *resolver = NULL;
-  GSocket *socket = NULL;
-  gssize wret;
   gboolean is_open;
   gchar *host;
   int port;
-  gboolean ret = FALSE;
-
-  GST_DEBUG_OBJECT (self, "starting");
+  GError *err = NULL;
+  GSocketClient *client;
+  GSocketConnection *connection;
+  GOutputStream *ostream = NULL;
+  gboolean ret;
 
   GST_OBJECT_LOCK (self);
   is_open = self->is_open;
   host = g_strdup (self->host);
   port = self->port;
+  connection = self->connection;
+  ostream = self->ostream;
+  GST_OBJECT_UNLOCK (self);
+
+  if (G_IS_SOCKET_CONNECTION (connection)) {
+    g_object_unref (connection);
+  }
+
+  client = g_socket_client_new ();
+  connection = g_socket_client_connect_to_host (client, host, port, self->cancellable, &err);
+  g_clear_object (&client);
+
+  if (connection) {
+    ostream = g_io_stream_get_output_stream (G_IO_STREAM (connection));
+  }
+
+  if (ostream) {
+    GST_DEBUG_OBJECT (ostream, "established connection to %s:%d", host, port);
+    ret = TRUE;
+  } else {
+    if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+      GST_DEBUG_OBJECT (self, "Cancelled connecting");
+    } else {
+      GST_ELEMENT_ERROR (self, RESOURCE, OPEN_READ, (NULL),
+          ("Failed to connect to host '%s:%d': %s", host, port,
+              err->message));
+    }
+  }
+
+  g_clear_error (&err);
+
+  GST_OBJECT_LOCK (self);
+  self->connection = connection;
+  self->ostream = ostream;
+  GST_OBJECT_UNLOCK (self);
+
+  g_free (host);
+  return ret;
+}
+
+
+static gboolean
+gst_pixelflutsink_start (GstBaseSink * bsink)
+{
+  GstPixelflutSink *self = GST_PIXELFLUTSINK (bsink);
+  GError *err = NULL;
+  gssize wret;
+  gboolean is_open;
+  gboolean ret = FALSE;
+  GSocketClient *client;
+  GSocketConnection *connection;
+  GOutputStream *ostream;
+  GDataInputStream *istream;
+  char *readbuf;
+  gsize rret;
+  int scanret, x, y;
+
+  GST_DEBUG_OBJECT (self, "starting");
+
+  GST_OBJECT_LOCK (self);
+  is_open = self->is_open;
   GST_OBJECT_UNLOCK (self);
 
   if (is_open) {
@@ -326,57 +379,27 @@ gst_pixelflutsink_start (GstBaseSink * bsink)
     goto cleanup;
   }
 
-  /* resolve hostname if necessary */
-  addr = g_inet_address_new_from_string (host);
-  if (!addr) {
-    GList *results;
-    resolver = g_resolver_get_default ();
-    results =
-        g_resolver_lookup_by_name (resolver, host, self->cancellable,
-        &err);
-    if (!results)
-      goto name_resolve;
-    addr = G_INET_ADDRESS (g_object_ref (results->data));
-
-    g_resolver_free_addresses (results);
+  if (!gst_pixelflutsink_establish_connection (self)) {
+    goto cleanup;
   }
-#ifndef GST_DISABLE_GST_DEBUG
-  {
-    gchar *ip = g_inet_address_to_string (addr);
-    GST_DEBUG_OBJECT (self, "IP address for host %s is %s", host, ip);
-    g_free (ip);
+
+  GST_OBJECT_LOCK (self);
+  connection = self->connection;
+  ostream = self->ostream;
+  GST_OBJECT_UNLOCK (self);
+
+  ret = g_output_stream_printf (ostream, NULL, self->cancellable, &err, "SIZE\n", 5);
+  if (!ret) {
+    goto size_failed;
   }
-#endif
-  saddr = g_inet_socket_address_new (addr, port);
 
-  /* create sending client socket */
-  GST_DEBUG_OBJECT (self, "opening sending client socket to %s:%d", host,
-      port);
-
-  socket =
-      g_socket_new (g_socket_address_get_family (saddr), G_SOCKET_TYPE_STREAM,
-      G_SOCKET_PROTOCOL_TCP, &err);
-
-  if (!socket)
-    goto no_socket;
-
-  GST_DEBUG_OBJECT (self, "opened sending client socket");
-
-  /* connect to server */
-  if (!g_socket_connect (socket, saddr, self->cancellable, &err))
-    goto connect_failed;
-
-  wret = g_socket_send (socket, "SIZE\n", 5, self->cancellable, &err);
-  if (wret != 5)
-    goto size_failed;
-
-  gchar readbuf[16];
-  gsize rret;
-  int scanret, x, y;
-  rret = g_socket_receive (socket, readbuf, sizeof(readbuf), self->cancellable, &err);
-  if (rret < 8)
-    goto size_failed;
-  readbuf[rret-1] = '\0';
+  istream = g_data_input_stream_new (g_io_stream_get_input_stream (G_IO_STREAM (connection)));
+  readbuf = g_data_input_stream_read_line_utf8 (istream, &rret, self->cancellable, &err);
+  if (!readbuf || rret < 8) {
+    err = g_error_new (GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_FAILED,
+        "Couldn't receive SIZE reply");
+      goto size_failed;
+  }
 
   scanret = sscanf(readbuf, "SIZE %d%d", &x, &y);
   if (scanret == 2) {
@@ -390,7 +413,6 @@ gst_pixelflutsink_start (GstBaseSink * bsink)
   GST_OBJECT_LOCK (self);
   self->is_open = TRUE;
   self->bytes_written = 0;
-  self->socket = g_object_ref (socket);
   self->canvas_width = x;
   self->canvas_height = y;
   GST_OBJECT_UNLOCK (self);
@@ -398,60 +420,26 @@ gst_pixelflutsink_start (GstBaseSink * bsink)
   ret = TRUE;
   goto cleanup;
 
-no_socket:
-  {
-    GST_ELEMENT_ERROR (self, RESOURCE, OPEN_READ, (NULL),
-        ("Failed to create socket: %s", err->message));
-    goto cleanup;
-  }
-name_resolve:
-  {
-    if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-      GST_DEBUG_OBJECT (self, "Cancelled name resolval");
-    } else {
-      GST_ELEMENT_ERROR (self, RESOURCE, OPEN_READ, (NULL),
-          ("Failed to resolve host '%s': %s", host, err->message));
+  size_failed:
+    {
+      if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+        GST_DEBUG_OBJECT (self, "Cancelled connecting");
+      } else {
+        GST_ELEMENT_ERROR (self, RESOURCE, OPEN_WRITE, (NULL),
+            ("Failed to query SIZE from Pixelflut server",
+                err ? err->message : ""));
+      }
+      goto cleanup;
     }
-    goto cleanup;
-  }
-connect_failed:
-  {
-    if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-      GST_DEBUG_OBJECT (self, "Cancelled connecting");
-    } else {
-      GST_ELEMENT_ERROR (self, RESOURCE, OPEN_READ, (NULL),
-          ("Failed to connect to host '%s:%d': %s", host, port,
-              err->message));
+
+  cleanup:
+    {
+      g_clear_error (&err);
+      GST_OBJECT_LOCK (self);
+      self->is_open = ret;
+      GST_OBJECT_UNLOCK (self);
+      return ret;
     }
-    goto cleanup;
-  }
-size_failed:
-  {
-    if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-      GST_DEBUG_OBJECT (self, "Cancelled connecting");
-    } else {
-      GST_ELEMENT_ERROR (self, RESOURCE, OPEN_WRITE, (NULL),
-          ("Failed to query SIZE from Pixelflut server '%s:%d': %s", host, port,
-              err ? err->message : ""));
-    }
-    goto cleanup;
-  }
-
-cleanup:
-  {
-    g_clear_error (&err);
-    g_clear_object (&resolver);
-    g_clear_object (&addr);
-    g_clear_object (&saddr);
-    g_clear_object (&socket);
-    g_free (host);
-
-    GST_OBJECT_LOCK (self);
-    self->is_open = ret;
-    GST_OBJECT_UNLOCK (self);
-
-    return ret;
-  }
 }
 
 static gboolean
@@ -460,31 +448,43 @@ gst_pixelflutsink_stop (GstBaseSink * bsink)
   GstPixelflutSink *self = GST_PIXELFLUTSINK (bsink);
   GError *err = NULL;
   gboolean is_open;
-  GSocket *socket;
+  GSocketConnection *connection;
+  GOutputStream *ostream;
 
   GST_DEBUG_OBJECT (self, "stop");
 
   GST_OBJECT_LOCK (self);
   is_open = self->is_open;
-  socket = self->socket;
+  ostream = self->ostream;
+  connection = self->connection;
   GST_OBJECT_UNLOCK (self);
 
   if (is_open)
     return TRUE;
 
-  if (socket) {
-    GST_DEBUG_OBJECT (self, "closing socket");
+  if (ostream) {
+    GST_DEBUG_OBJECT (ostream, "closing ostream");
 
-    if (!g_socket_close (socket, &err)) {
+    if (!g_output_stream_close (ostream, NULL, &err)) {
+      GST_ERROR_OBJECT (self, "Failed to close stream: %s", err->message);
+      g_clear_error (&err);
+    }
+    g_object_unref (ostream);
+  }
+
+  if (connection) {
+    GST_DEBUG_OBJECT (connection, "closing connection");
+
+    if (!g_io_stream_close (G_IO_STREAM (connection), NULL, &err)) {
       GST_ERROR_OBJECT (self, "Failed to close socket: %s", err->message);
       g_clear_error (&err);
     }
-    g_object_unref (socket);
-    socket = NULL;
+    g_object_unref (connection);
   }
 
   GST_OBJECT_LOCK (self);
-  self->socket = socket;
+  self->ostream = NULL;
+  self->connection = NULL;
   self->is_open = FALSE;
   GST_OBJECT_UNLOCK (self);
 
@@ -536,7 +536,7 @@ gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
   gsize packet_offset = 0;  // for fragmented sending
   GError *err = NULL;
   gboolean is_open;
-  GSocket *socket;
+  GOutputStream *ostream;
   gint fragments_count = 0;
   gssize fragment_written = 0;
   gsize frame_written = 0;
@@ -546,7 +546,7 @@ gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
   offset_top = self->offset_top;
   info = self->info;
   is_open = self->is_open;
-  socket = self->socket;
+  ostream = self->ostream;
   ppp = self->pixels_per_packet;
   canvas_w = self->canvas_width;
   canvas_h = self->canvas_height;
@@ -606,7 +606,7 @@ gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
             gssize wret;
             fragments_count++;
             wret =
-              g_socket_send (socket, outbuf + fragment_written,
+              g_output_stream_write (ostream, outbuf + fragment_written,
               packet_offset - fragment_written, self->cancellable, &err);
             if (wret < 0) {
               goto write_error;
@@ -640,11 +640,11 @@ gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
                   frame_written, fragments_count);
 
   return GST_FLOW_OK;
-
+ 
   /* ERRORS */
 invalid_frame:
   {
-    GST_WARNING_OBJECT (self, "invalid frame");
+    GST_WARNING_OBJECT (self, "invalid frame"); 
     return GST_FLOW_ERROR;
   }
 write_error:
@@ -654,11 +654,14 @@ write_error:
     if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
       ret = GST_FLOW_FLUSHING;
       GST_DEBUG_OBJECT (self, "Cancelled writing to socket");
-    } else {
-      GST_ELEMENT_ERROR (self, RESOURCE, WRITE,
-          ("Error while sending data."),
-          ("Only %" G_GSIZE_FORMAT " of %" G_GSIZE_FORMAT " bytes written: %s",
-              fragment_written, strlen(outbuf), err->message));
+    } else if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED)) {
+      GST_INFO_OBJECT (self, "connection closed, re-establishing!");
+      gst_pixelflutsink_establish_connection (self);
+      ret = GST_FLOW_OK;
+    }  else {
+      GST_WARNING_OBJECT (self, "Error while sending data. framents=%d Only %"
+              G_GSIZE_FORMAT " of %" G_GSIZE_FORMAT " bytes written: %s",
+              fragments_count, fragment_written, strlen(outbuf), err->message);
       ret = GST_FLOW_ERROR;
     }
     gst_video_frame_unmap (&frame);
