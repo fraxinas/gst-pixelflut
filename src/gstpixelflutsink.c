@@ -305,7 +305,11 @@ static gboolean gst_pixelflutsink_establish_connection (GstPixelflutSink *self)
   GSocketClient *client;
   GSocketConnection *connection;
   GOutputStream *ostream = NULL;
-  gboolean ret;
+  GDataInputStream *istream = NULL;
+  char *readbuf;
+  gsize rret;
+  int scanret, x, y;
+  gboolean ret = FALSE;
 
   GST_OBJECT_LOCK (self);
   is_open = self->is_open;
@@ -329,67 +333,11 @@ static gboolean gst_pixelflutsink_establish_connection (GstPixelflutSink *self)
 
   if (ostream) {
     GST_DEBUG_OBJECT (ostream, "established connection to %s:%d", host, port);
-    ret = TRUE;
   } else {
-    if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-      GST_DEBUG_OBJECT (self, "Cancelled connecting");
-    } else {
-      GST_ELEMENT_ERROR (self, RESOURCE, OPEN_READ, (NULL),
-          ("Failed to connect to host '%s:%d': %s", host, port,
-              err->message));
-    }
+    goto connect_failed;
   }
 
-  g_clear_error (&err);
-
-  GST_OBJECT_LOCK (self);
-  self->connection = connection;
-  self->ostream = ostream;
-  GST_OBJECT_UNLOCK (self);
-
-  g_free (host);
-  return ret;
-}
-
-
-static gboolean
-gst_pixelflutsink_start (GstBaseSink * bsink)
-{
-  GstPixelflutSink *self = GST_PIXELFLUTSINK (bsink);
-  GError *err = NULL;
-  gssize wret;
-  gboolean is_open;
-  gboolean ret = FALSE;
-  GSocketClient *client;
-  GSocketConnection *connection;
-  GOutputStream *ostream;
-  GDataInputStream *istream;
-  char *readbuf;
-  gsize rret;
-  int scanret, x, y;
-
-  GST_DEBUG_OBJECT (self, "starting");
-
-  GST_OBJECT_LOCK (self);
-  is_open = self->is_open;
-  GST_OBJECT_UNLOCK (self);
-
-  if (is_open) {
-    ret = TRUE;
-    goto cleanup;
-  }
-
-  if (!gst_pixelflutsink_establish_connection (self)) {
-    goto cleanup;
-  }
-
-  GST_OBJECT_LOCK (self);
-  connection = self->connection;
-  ostream = self->ostream;
-  GST_OBJECT_UNLOCK (self);
-
-  ret = g_output_stream_printf (ostream, NULL, self->cancellable, &err, "SIZE\n", 5);
-  if (!ret) {
+  if (!g_output_stream_printf (ostream, NULL, self->cancellable, &err, "SIZE\n", 5)) {
     goto size_failed;
   }
 
@@ -410,36 +358,72 @@ gst_pixelflutsink_start (GstBaseSink * bsink)
     goto size_failed;
   }
 
-  GST_OBJECT_LOCK (self);
-  self->is_open = TRUE;
-  self->bytes_written = 0;
-  self->canvas_width = x;
-  self->canvas_height = y;
-  GST_OBJECT_UNLOCK (self);
-
   ret = TRUE;
   goto cleanup;
 
+  connect_failed:
+  {
+    if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+      GST_DEBUG_OBJECT (self, "Cancelled connecting");
+    } else {
+      GST_ELEMENT_ERROR (self, RESOURCE, OPEN_READ, (NULL),
+          ("Failed to connect to host '%s:%d': %s", host, port,
+              err->message));
+    }
+    goto cleanup;
+  }
   size_failed:
-    {
-      if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-        GST_DEBUG_OBJECT (self, "Cancelled connecting");
-      } else {
-        GST_ELEMENT_ERROR (self, RESOURCE, OPEN_WRITE, (NULL),
-            ("Failed to query SIZE from Pixelflut server",
-                err ? err->message : ""));
-      }
-      goto cleanup;
+  {
+    if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+      GST_DEBUG_OBJECT (self, "Cancelled connecting");
+    } else {
+      GST_ELEMENT_ERROR (self, RESOURCE, OPEN_WRITE, (NULL),
+          ("Failed to query SIZE from Pixelflut server",
+              err ? err->message : ""));
     }
-
+    goto cleanup;
+  }
   cleanup:
-    {
-      g_clear_error (&err);
-      GST_OBJECT_LOCK (self);
-      self->is_open = ret;
-      GST_OBJECT_UNLOCK (self);
-      return ret;
-    }
+  {
+    g_clear_error (&err);
+    g_object_unref (istream);
+    g_free (host);
+    GST_OBJECT_LOCK (self);
+    self->connection = connection;
+    self->ostream = ostream;
+    self->canvas_width = x;
+    self->canvas_height = y;
+    GST_OBJECT_UNLOCK (self);
+    return ret;
+  }
+}
+
+
+static gboolean
+gst_pixelflutsink_start (GstBaseSink * bsink)
+{
+  GstPixelflutSink *self = GST_PIXELFLUTSINK (bsink);
+  gboolean is_open;
+  gboolean ret;
+
+  GST_DEBUG_OBJECT (self, "starting");
+
+  GST_OBJECT_LOCK (self);
+  is_open = self->is_open;
+  GST_OBJECT_UNLOCK (self);
+
+  if (is_open) {
+    return TRUE;
+  }
+
+  ret = gst_pixelflutsink_establish_connection (self);
+
+  GST_OBJECT_LOCK (self);
+  self->bytes_written = 0;
+  self->is_open = ret;
+  GST_OBJECT_UNLOCK (self);
+
+  return ret;
 }
 
 static gboolean
@@ -656,8 +640,11 @@ write_error:
       GST_DEBUG_OBJECT (self, "Cancelled writing to socket");
     } else if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED)) {
       GST_INFO_OBJECT (self, "connection closed, re-establishing!");
-      gst_pixelflutsink_establish_connection (self);
-      ret = GST_FLOW_OK;
+      if (gst_pixelflutsink_establish_connection (self)) {
+        ret = GST_FLOW_OK;
+      } else {
+        ret = GST_FLOW_ERROR;
+      }
     }  else {
       GST_WARNING_OBJECT (self, "Error while sending data. framents=%d Only %"
               G_GSIZE_FORMAT " of %" G_GSIZE_FORMAT " bytes written: %s",
