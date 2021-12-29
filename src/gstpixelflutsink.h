@@ -31,6 +31,12 @@ G_BEGIN_DECLS
 #define GST_TYPE_PIXELFLUTSINK gst_pixelflutsink_get_type ()
 G_DECLARE_FINAL_TYPE (GstPixelflutSink, gst_pixelflutsink, GST, PIXELFLUTSINK, GstVideoSink)
 
+typedef enum
+{
+  GST_PIXELFLUTSINK_STRATEGY_FULLFRAME,
+  GST_PIXELFLUTSINK_STRATEGY_UPDATE
+} GstPixelflutSinkStrategy;
+
 /**
  * GstPixelflutSink:
  *
@@ -62,6 +68,9 @@ struct _GstPixelflutSink
   GCancellable *cancellable;
   gboolean is_open;
   guint pixels_per_packet;
+
+  GstPixelflutSinkStrategy strategy;
+  GstBuffer *prev_buffer;
 };
 
 G_END_DECLS

@@ -61,11 +61,13 @@ enum
   PROP_PIXELS_PER_PACKET,
   PROP_CANVAS_WIDTH,
   PROP_CANVAS_HEIGHT,
+  PROP_STRATEGY,
 };
 
 #define DEFAULT_PORT 1337
 #define DEFAULT_HOST "localhost"
 #define DEFAULT_PPP 10
+#define DEFAULT_STRATEGY GST_PIXELFLUTSINK_STRATEGY_FULLFRAME
 #define CANVAS_MAX 9999
 
 /* Define a generic SINKPAD template */
@@ -89,6 +91,24 @@ static void gst_pixelflutsink_get_property (GObject *object, guint prop_id, GVal
 static void gst_pixelflutsink_finalize (GObject *object);
 
 static GstFlowReturn gst_pixelflutsink_send_frame (GstVideoSink * videosink, GstBuffer * buffer);
+
+#define GST_TYPE_PIXELFLUTSINK_STRATEGY (gst_pixelflutsink_strategy_get_type ())
+static GType
+gst_pixelflutsink_strategy_get_type (void)
+{
+  static GType gst_pixelflutsink_strategy = 0;
+  static const GEnumValue strategies[] = {
+    {GST_PIXELFLUTSINK_STRATEGY_FULLFRAME, "Full frame (pixel per pixel)", "full"},
+    {GST_PIXELFLUTSINK_STRATEGY_UPDATE, "Update (changed pixels)", "update"},
+    {0, NULL, NULL}
+  };
+
+  if (!gst_pixelflutsink_strategy) {
+    gst_pixelflutsink_strategy =
+        g_enum_register_static ("GstPixelflutSinkStrategy", strategies);
+  }
+  return gst_pixelflutsink_strategy;
+}
 
 static void
 gst_pixelflutsink_class_init (GstPixelflutSinkClass *klass)
@@ -142,6 +162,11 @@ gst_pixelflutsink_class_init (GstPixelflutSinkClass *klass)
       g_param_spec_uint ("canvas-height",
           "Canvas height", "Height of Pixelflut server's canvas in pixels", 0, CANVAS_MAX, 0,
           G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_STRATEGY,
+      g_param_spec_enum ("strategy", "Sending strateg",
+          "Which pixels should be updated per frame, and how.",
+          GST_TYPE_PIXELFLUTSINK_STRATEGY, DEFAULT_STRATEGY,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   gst_element_class_set_static_metadata (element_class,
       "Pixelflut Sink", "Sink/Video/Network",
@@ -173,6 +198,8 @@ gst_pixelflutsink_init (GstPixelflutSink *self)
   self->cancellable = g_cancellable_new ();
 
   self->pixels_per_packet = DEFAULT_PPP;
+  self->strategy = DEFAULT_STRATEGY;
+  self->prev_buffer = NULL;
 
   self->is_open = FALSE;
 
@@ -186,6 +213,8 @@ static void gst_pixelflutsink_finalize (GObject *object)
   g_clear_object (&self->cancellable);
 
   g_free (self->host);
+
+  gst_buffer_unref (self->prev_buffer);
 
   GST_INFO_OBJECT (self, "finalized. sent %i frames and %" G_GSIZE_FORMAT
                    " bytes", self->frames_sent, self->bytes_written);
@@ -248,6 +277,9 @@ gst_pixelflutsink_set_property (GObject *object, guint prop_id, const GValue *va
     case PROP_PIXELS_PER_PACKET:
       self->pixels_per_packet = g_value_get_uint (value);
       break;
+    case PROP_STRATEGY:
+      self->strategy = g_value_get_enum (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -288,6 +320,9 @@ gst_pixelflutsink_get_property (GObject *object, guint prop_id, GValue *value, G
       break;
     case PROP_CANVAS_HEIGHT:
       g_value_set_uint (value, self->canvas_height);
+      break;
+    case PROP_STRATEGY:
+      g_value_set_enum (value, self->strategy);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -524,6 +559,8 @@ gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
   gint fragments_count = 0;
   gssize fragment_written = 0;
   gsize frame_written = 0;
+  gsize skipped_pixels = 0;
+  GstVideoFrame prev_frame;
 
   GST_OBJECT_LOCK (self);
   offset_left = self->offset_left;
@@ -539,6 +576,11 @@ gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
   gchar outbuf[22*ppp+1];  // to assemble the pixeflut command
 
   g_return_val_if_fail (is_open, GST_FLOW_FLUSHING);
+
+  if (GST_IS_BUFFER(self->prev_buffer) && self->strategy == GST_PIXELFLUTSINK_STRATEGY_UPDATE) {
+  if (!gst_video_frame_map (&prev_frame, &info, self->prev_buffer, GST_MAP_READ))
+    goto invalid_frame;
+  }
 
   /* Fill GstVideoFrame structure so that pixel data can accessed */
   if (!gst_video_frame_map (&frame, &info, buffer, GST_MAP_READ))
@@ -574,6 +616,19 @@ gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
           }
           g_snprintf (alpha_str, 3, "%02x", val);
         }
+        if (GST_IS_BUFFER(self->prev_buffer) && self->strategy == GST_PIXELFLUTSINK_STRATEGY_UPDATE) {
+          guint8 *prev_data = (guint8 *) GST_VIDEO_FRAME_PLANE_DATA (&prev_frame, 0);
+          if (data[offsets[0]] == prev_data[offsets[0]] &&
+              data[offsets[1]] == prev_data[offsets[1]] &&
+              data[offsets[2]] == prev_data[offsets[2]])
+              {
+                /* skip unchanged pixel */
+                data += pixel_stride;
+                skipped_pixels += 1;
+                continue;
+              }
+        }
+
         g_snprintf (outbuf+packet_offset, 22,
                     "PX %d %d %02x%02x%02x%s\n",
                     x+offset_left, y+offset_top,
@@ -613,22 +668,28 @@ gst_pixelflutsink_send_frame (GstVideoSink * vsink, GstBuffer * buffer)
       data += row_wrap;
     }
   }
+
   gst_video_frame_unmap (&frame);
+  if (self->strategy == GST_PIXELFLUTSINK_STRATEGY_UPDATE) {
+    if (!GST_IS_BUFFER(self->prev_buffer))
+      self->prev_buffer = gst_buffer_new_allocate (NULL, gst_buffer_get_size (buffer), 0);
+  }
 
   GST_OBJECT_LOCK (self);
   self->bytes_written += frame_written;
   self->frames_sent++;
   GST_OBJECT_UNLOCK (self);
 
-  GST_LOG_OBJECT (self, "frame finished. %" G_GSIZE_FORMAT "bytes sent in %d fragments",
-                  frame_written, fragments_count);
+  GST_LOG_OBJECT (self, "frame finished. %" G_GSIZE_FORMAT " bytes sent in %d fragments. "
+  " %" G_GSIZE_FORMAT " pixels skipped.",
+                  frame_written, fragments_count, skipped_pixels);
 
   return GST_FLOW_OK;
- 
+
   /* ERRORS */
 invalid_frame:
   {
-    GST_WARNING_OBJECT (self, "invalid frame"); 
+    GST_WARNING_OBJECT (self, "invalid frame");
     return GST_FLOW_ERROR;
   }
 write_error:
